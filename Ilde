@@ -1,0 +1,324 @@
+-----------------------------------------------------------
+-- 伊尔德脚本验证核心逻辑（LocalScript，适配多注入器）
+-- 验证标记：注入器持久化目录下的"同意伊尔德脚本"文件夹
+-----------------------------------------------------------
+-- ================ 基础服务与变量 ================
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local RunService = game:GetService("RunService")
+local Color3 = Color3
+local UDim2 = UDim2
+local Instance = Instance
+local task = task
+local Enum = Enum
+-- 注入器文件操作兼容（核心：获取持久化路径）
+local readFunc, writeFunc, getPathFunc
+pcall(function()
+    -- 适配忍者/Delta/Synapse等注入器
+    if type(syn) == "table" then
+        readFunc = syn.readfile or readfile
+        writeFunc = syn.writefile or writefile
+        getPathFunc = syn.datapath  -- 忍者注入器获取沙盒路径
+    else
+        -- 其他注入器兼容
+        readFunc = readfile or readFile
+        writeFunc = writefile or writeFile
+        -- 尝试获取默认路径（如Krnl等）
+        getPathFunc = function() return "Roblox/Scripts" end
+    end
+end)
+-- ================ 验证文件夹核心逻辑 ================
+-- 获取持久化文件夹路径（跨注入器兼容）
+local function getVerifyFolderPath()
+    local basePath
+    if getPathFunc then
+        -- 优先使用注入器提供的沙盒路径（如忍者的syn.datapath()）
+        basePath = getPathFunc()
+    else
+        --  fallback路径（适配多数PC注入器）
+        basePath = "C:/RobloxScripts"  -- 可根据系统自动调整
+        pcall(function()
+            -- 尝试检测系统类型（Windows/macOS）
+            if game:GetService("RunService"):IsStudio() then
+                basePath = "Roblox/Scripts"  -- Studio环境
+            elseif string.find(game:GetService("MarketplaceService"):GetProductInfo(1).Name, "Mac") then
+                basePath = "~/Library/Roblox/Scripts"  -- macOS路径
+            end
+        end)
+    end
+    -- 拼接完整文件夹路径
+    return basePath .. "/同意秋容脚本"
+end
+-- 检查文件夹是否存在（跨注入器兼容）
+local function folderExists()
+    if not readFunc then return false end  -- 无文件操作能力则强制验证
+    local folderPath = getVerifyFolderPath()
+    -- 尝试读取文件夹（注入器通常通过检查路径是否可访问判断存在性）
+    local success = pcall(function()
+        -- 不同注入器判断方式可能不同，这里用"尝试读取"作为存在性检测
+        readFunc(folderPath .. "/.verify")  -- 读取文件夹内的标记文件
+    end)
+    return success
+end
+-- 创建验证文件夹（跨注入器兼容）
+local function createTargetFolder()
+    if not writeFunc then return end  -- 无写入能力则跳过（不影响使用，仅下次仍需验证）
+    local folderPath = getVerifyFolderPath()
+    local success = pcall(function()
+        -- 1. 创建文件夹（注入器通常支持通过写入空文件创建文件夹）
+        writeFunc(folderPath .. "/.verify", "")  -- 写入空标记文件，自动创建父文件夹
+        print("验证文件夹创建成功：" .. folderPath)
+    end)
+    if not success then
+        -- 降级方案：若无法创建文件夹，临时用PlayerGui文件夹（仅当前会话有效）
+        local tempFolder = Instance.new("Folder")
+        tempFolder.Name = "同意秋容脚本"
+        tempFolder.Parent = PlayerGui
+        print("警告：持久化文件夹创建失败，使用临时文件夹（仅当前会话有效）")
+    end
+end
+-- ================ 通用UI工具函数 ================
+-- 创建屏幕GUI
+local function createScreenGui(name)
+    local gui = Instance.new("ScreenGui")
+    gui.Name = name
+    gui.IgnoreGuiInset = true
+    gui.Parent = PlayerGui
+    return gui
+end
+-- 创建带圆角的框架
+local function createFrame(parent, size, position)
+    local frame = Instance.new("Frame")
+    frame.Size = size
+    frame.Position = position
+    frame.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
+    frame.BackgroundTransparency = 0.3
+    frame.BorderSizePixel = 1
+    frame.BorderColor3 = Color3.fromRGB(180, 160, 255)
+    frame.Parent = parent
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = frame
+    return frame
+end
+-- 创建基础标签
+local function createBasicLabel(parent, text, size, position)
+    local label = Instance.new("TextLabel")
+    label.Text = text
+    label.Size = size
+    label.Position = position
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 16
+    label.BackgroundTransparency = 1
+    label.Parent = parent
+    return label
+end
+-- 创建普通标签
+local function createLabel(parent, text, size, position)
+    local label = Instance.new("TextLabel")
+    label.Text = text
+    label.Size = size
+    label.Position = position
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 16
+    label.BackgroundTransparency = 1
+    label.Parent = parent
+    return label
+end
+-- 创建按钮
+local function createButton(parent, text, size, position, callback)
+    local btn = Instance.new("TextButton")
+    btn.Text = text
+    btn.Size = size
+    btn.Position = position
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.TextSize = 14
+    btn.Parent = parent
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = btn
+    if callback then
+        btn.MouseButton1Click:Connect(callback)
+    end
+    return btn
+end
+-- 创建点击输入框
+local function createClickToInput(parent, size, position, triggerText, placeholderText)
+    local trigger = Instance.new("TextButton")
+    trigger.Size = size
+    trigger.Position = position
+    trigger.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    trigger.BackgroundTransparency = 0.7
+    trigger.Text = triggerText
+    trigger.TextColor3 = Color3.new(1, 1, 1)
+    trigger.TextSize = 14
+    trigger.Parent = parent
+    local cornerTrigger = Instance.new("UICorner")
+    cornerTrigger.CornerRadius = UDim.new(0, 6)
+    cornerTrigger.Parent = trigger
+    local box = Instance.new("TextBox")
+    box.Size = size
+    box.Position = position
+    box.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    box.BackgroundTransparency = 0.7
+    box.TextColor3 = Color3.new(1, 1, 1)
+    box.TextSize = 14
+    box.PlaceholderText = placeholderText
+    box.Visible = false
+    box.Parent = parent
+    local cornerBox = Instance.new("UICorner")
+    cornerBox.CornerRadius = UDim.new(0, 6)
+    cornerBox.Parent = box
+    trigger.MouseButton1Click:Connect(function()
+        trigger.Visible = false
+        box.Visible = true
+        box:CaptureFocus()
+    end)
+    return trigger, box
+end
+-- 播放临时音效
+local function playTempSound(soundId)
+    local fullSoundId = "rbxassetid://" .. tostring(soundId)
+    local sound = Instance.new("Sound")
+    sound.SoundId = fullSoundId
+    sound.Volume = 1.0
+    sound.Parent = workspace
+    pcall(function()
+        sound:Play()
+        sound.Ended:Connect(function() sound:Destroy() end)
+        task.delay(5, function() if sound.Parent then sound:Destroy() end end)
+    end)
+end
+-- ================ 公告弹窗（添加滚动功能） ================
+local function showAnnouncement()
+    local noticeGui = createScreenGui("Popup_Announcement")
+    local noticeFrame = createFrame(noticeGui, UDim2.new(0, 400, 0, 300), UDim2.new(0.5, -200, 0.5, -150))
+    
+    -- 标题（缩小50%：原22 → 11）
+    local titleLabel = createBasicLabel(noticeFrame, "3.1汉化版 脚本公告", UDim2.new(1, 0, 0, 40), UDim2.new(0, 0, 0, 15))
+    titleLabel.TextSize = 22 * 0.5  -- 仅公告标题缩小
+    titleLabel.TextColor3 = Color3.fromRGB(255, 210, 0)
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Center
+    
+    -- 创建滚动框架
+    local scrollFrame = Instance.new("ScrollingFrame")
+    scrollFrame.Name = "AnnouncementScroll"
+    scrollFrame.Size = UDim2.new(1, -20, 0, 180)
+    scrollFrame.Position = UDim2.new(0, 10, 0, 60)
+    scrollFrame.BackgroundTransparency = 1
+    scrollFrame.ScrollBarThickness = 8
+    scrollFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+    scrollFrame.Parent = noticeFrame
+    
+    -- 内容标签（放在滚动框架内）
+    local contentLabel = createLabel(scrollFrame, "更新日志:\n8月21日05:35更新军事大亨去除GB失效脚本全自动农场脚本挂机即可\n8月21日10:07更新墨水游戏新版老外Xa包括使用教程获取方法和注意事项\n8月21日00:58更新WARMIX[PVP FPS 武器战斗射击枪]-保护房屋免受怪物侵害-保护总统\n8月22日18:17添加了chain服务器脚本\n9月12日更新墨水游戏汉化脚目前作者已学会汉化逐渐汉化中\n9月13日10:00更新新的墨水游戏汉化去除墨水游戏过期脚本去除ink-game正常版添加ink-game测试版汉化\n9月13日16:12全面取消汉化更新新的方法等待半天新更新了Xa链接修复过期\n9月13日23:08更新一键汉化脚本打开脚本点击按钮将进行汉化目前只支持墨水游戏ax或ink-game和RINGTA一键汉化脚本在墨水游戏菜单(禁止拿去圈💰尤其是知道源码地址的人)\n9月14日12:23添加了最强战场汉化还是在一键汉化脚本里面，还是在墨水菜单", 
+        UDim2.new(1, -10, 0, 0), UDim2.new(0, 5, 0, 5))
+    contentLabel.TextSize = 16 * 0.5  -- 仅公告内容缩小
+    contentLabel.TextWrapped = true
+    contentLabel.TextXAlignment = Enum.TextXAlignment.Left
+    contentLabel.AutomaticSize = Enum.AutomaticSize.Y
+    
+    -- 设置滚动框架的CanvasSize
+    contentLabel:GetPropertyChangedSignal("TextBounds"):Connect(function()
+        scrollFrame.CanvasSize = UDim2.new(0, 0, 0, contentLabel.TextBounds.Y + 10)
+    end)
+    
+    -- 关闭按钮
+    local noticeDone = false
+    createButton(noticeFrame, "我知道了", UDim2.new(0.5, 0, 0, 40), UDim2.new(0.25, 0, 1, -50), function()
+        noticeDone = true
+        noticeGui:Destroy()
+    end)
+    
+    while not noticeDone do task.wait() end
+end
+-- ================ 执行流程（已去除验证） ================
+-- 强制跳过所有验证，直接创建文件夹+显示公告
+createTargetFolder()  -- 直接创建验证文件夹（避免后续触发验证）
+showAnnouncement()  -- 显示公告后进入主功能
+
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local StarterGui = game:GetService("StarterGui")
+local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
+local HttpService = game:GetService("HttpService") -- 新增HTTP服务引用
+-- ====================== 配置与状态管理 ======================
+local CONFIG = {
+    TWEEN_DURATION = 0.25,       -- 动画时长
+    UPDATE_INTERVAL = 0.5,       -- 玩家列表更新间隔
+    UI_SCALE = { default = 0.8 },-- 默认缩放比例
+    UI_COLORS = {                -- 主题色
+        primary = Color3.fromRGB(60, 60, 100),
+        secondary = Color3.fromRGB(50, 50, 70),
+        accent = Color3.fromRGB(255, 230, 100),
+        success = Color3.fromRGB(60, 100, 80),
+        danger = Color3.fromRGB(150, 50, 50),
+        localPlayer = Color3.fromRGB(100, 200, 255)
+    },
+    NOTIFICATION = {             -- 通知配置
+        DURATION = 3,            -- 显示时长（秒）
+        SOUND_ID = "rbxassetid://79348298352567", -- 叮咚音效
+        CORNER_RADIUS = 12       -- 通知框圆角
+    }
+}
+local UI_STATE = {
+    scale = CONFIG.UI_SCALE.default,  -- 当前UI缩放比例
+    activeMenu = "保存位置",          -- 初始激活菜单（面板标识，不可修改）
+    menuPanels = {},                  -- 菜单面板缓存（键：面板标识，值：面板实例）
+    isRunning = true,                 -- 脚本运行状态
+    isScaling = false,                -- 缩放中标记
+    mainPanel = nil,                  -- 主面板引用
+    floatBtn = nil,                   -- 悬浮窗按钮
+    topBar = nil,                     -- 顶部栏引用
+    isDragging = false,               -- 拖动中标记
+    isScrolling = false,              -- 滚动中标记
+    dragStart = Vector2.new(0, 0),    -- 拖动起始位置
+    panelStartPos = UDim2.new(0, 0, 0, 0), -- 面板初始位置
+    scrollStartPositions = {},        -- 滚动起始位置缓存
+    savedCoordinates = {},            -- 已保存坐标
+    csvFilePath = "",                 -- CSV文件路径
+    coordinateLoop = nil,             -- 坐标更新循环
+    playerPositionLoop = nil,         -- 玩家位置更新循环
+    playerSortMode = "name",          -- 玩家排序模式（name/distance）
+    isToggleFeatureEnabled = false,   -- 穿墙功能开关状态（默认关闭）
+    wallhackConnection = nil,          -- 存储角色部件监听连接
+    characterAddedConn = nil,
+    characterRemovingConn = nil
+}
+-- ====================== 工具函数 ======================
+-- 创建圆角（适配缩放）
+local function createCorner(parent, radius)
+    if not parent or not parent:IsDescendantOf(game) then return end
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, radius * UI_STATE.scale)
+    corner.Parent = parent
+end
+-- 创建文本标签（适配缩放）
+local function createLabel(parent, props)
+    if not parent or not parent:IsDescendantOf(game) then return nil end
+    local label = Instance.new("TextLabel")
+    label.Name = props.name or "Label"
+    label.Size = props.size or UDim2.new(1, 0, 1, 0)
+    label.Position = props.position or UDim2.new(0, 0, 0, 0)
+    label.Text = props.text or ""
+    label.TextColor3 = props.color or Color3.new(1, 1, 1)
+    label.TextSize = (props.textSize or 14) * UI_STATE.scale
+    label.TextXAlignment = props.xAlign or Enum.TextXAlignment.Left
+    label.BackgroundTransparency = props.bgTransparency or 1
+    label.BackgroundColor3 = props.bgColor or Color3.new(0, 0, 0)
+    label.Font = props.font or Enum.Font.SourceSans
+    label.Parent = parent
+    label.Active = props.active or false
+    if props.anchor then
+        label.AnchorPoint = props.anchor
+    end
+    return label
+end
+-- 创建按钮（适配缩放 + 悬停动画）
+local function createButton(parent, props)
+    if not parent or not parent:IsDescendantOf(game) then return nil end
+    local btn = Instance.new("TextButton")
+    btn.Name
